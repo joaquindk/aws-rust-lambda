@@ -1,0 +1,39 @@
+FROM joaquindk/aws-lambda-provided-rust AS planner
+WORKDIR /app
+# We only pay the installation cost once, 
+# it will be cached from the second build onwards
+# To ensure a reproducible build consider pinning 
+# the cargo-chef version with `--version X.X.X`
+RUN cargo install cargo-chef 
+COPY . .
+# Compute a lock-like file for our project
+RUN cargo chef prepare --recipe-path recipe.json
+RUN pwd 
+RUN ls 
+
+FROM joaquindk/aws-lambda-provided-rust AS cacher
+WORKDIR /app
+RUN cargo install cargo-chef
+COPY --from=planner /app/recipe.json recipe.json
+# Build our project dependencies, not our application! 
+RUN cargo chef cook --release --recipe-path recipe.json
+
+# Builder stage
+FROM joaquindk/aws-lambda-provided-rust AS builder
+WORKDIR /app
+# Copy over the cached dependencies
+COPY --from=cacher /app/target target
+COPY --from=cacher /root/.cargo/registry /root/.cargo/.registry
+COPY . .
+ENV SQLX_OFFLINE true
+RUN cargo build --release --bin hello_server
+
+# Runtime stage
+FROM joaquindk/aws-lambda-provided-rust as runtime
+
+WORKDIR /app
+# Copy the compiled binary from the builder environment 
+# to our runtime environment
+COPY --from=builder /app/target/release/hello_server hello_server
+ENV RUST_LOG debug
+ENTRYPOINT ["./hello_server"]
